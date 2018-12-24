@@ -1,12 +1,15 @@
 CC=g++
-CFLAGS=-I/home/manu/scratch/manuflow -g -O0 -Wall -std=c++11
+CPPFLAGS += -isystem -I$(CURDIR)
+CFLAGS=-I$(CURDIR) -g -O0 -Wall -std=c++11
 
-all: test
+all: matrix_test
 
 clean:
-	rm *.o test
+	rm *.o matrix_test
 
-test: test.cc matrix
-	$(CC) $(CFLAGS) -o test test.cc
+tests_main.o: tests_main.cc
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o tests_main.o -c tests_main.cc
 
-matrix: matrix.h matrix_impl.h
+matrix_test: matrix_test.cc tests_main.o
+	$(CC) $(CFLAGS) -o matrix_test matrix_test.cc tests_main.o
+

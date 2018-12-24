@@ -1,5 +1,6 @@
 // Implementation of matrix methods.
 #include <algorithm>
+#include <cassert>
 #include <functional>
 #include <type_traits>
 
@@ -34,6 +35,15 @@ void check_dim_match(const T& lhs, const U& rhs) {
   }
 }
 
+// Check that matrix dimensions match for matrix multiplication. Raises
+// std::invalid_argument exception if they don't match.
+template <typename T, typename U>
+void check_dot_dim_match(const T& lhs, const U& rhs) {
+  if (lhs.cols() != rhs.rows()) {
+    throw std::invalid_argument("lhs column dim doesn't match rhs row dim");
+  }
+}
+
 // An iterator maintains a linear index over a 2D table, and abstracts over
 // different iteration orders. A "friendly" iterator means the memory is layed
 // out in the same way as is being iterated over, which means we can advance to
@@ -50,6 +60,7 @@ class FriendlyIterator {
   void rewind_minor_dim(size_t n) { index_ -= n; }
   // Only call this when we're at the end of the current minor dim.
   void next_major_dim() { ++index_; }
+  void reset() { index_ = 0; }
 
  private:
   size_t index_;
@@ -64,6 +75,7 @@ class UnfriendlyIterator {
   void rewind_minor_dim(size_t n) { index_ -= minor_dim_stride_ * n; }
   // Only call this when we're at the end of the current minor dim.
   void next_major_dim() { index_ = (index_ + 1) % minor_dim_stride_; }
+  void reset() { index_ = 0; }
 
  private:
   size_t index_;
@@ -147,6 +159,7 @@ class BroadcastFriendlyIterator {
   void next_minor_dim() { ++index_; }
   void rewind_minor_dim(size_t n) { index_ -= n; }
   void next_major_dim() { index_ = 0; }
+  void reset() { index_ = 0; }
 
  private:
   size_t index_;
@@ -159,6 +172,7 @@ class BroadcastUnfriendlyIterator {
   void next_minor_dim() {}
   void rewind_minor_dim(size_t n) {}
   void next_major_dim() { ++index_; }
+  void reset() { index_ = 0; }
 
  private:
   size_t index_;
@@ -211,6 +225,7 @@ class ShellMatrixIterator {
   void next_minor_dim() {}
   void rewind_minor_dim(size_t) {}
   void next_major_dim() {}
+  void reset() {}
 };
 
 using ShellMatrixRowMajorIterator = ShellMatrixIterator<true>;
@@ -417,6 +432,101 @@ void copy_data(Matrix<T>* dst, const Matrix<U>& src) {
   }
 }
 
+// Matrix multiplies lhs and rhs, and stores the result in dst. Does row-wise
+// matrix-multiplication (iterate over dst in row-major order). Assumes dst and
+// lhs are both row-major. Uses the given ColMajor iterator type for rhs.
+template <typename UIter, typename T, typename U>
+void dot_rowwise(Matrix<T>* dst, const Matrix<T>& lhs, const Matrix<U>& rhs) {
+  assert(dst->is_row_major());
+  assert(lhs.is_row_major());
+  static_assert(!UIter::is_row_major,
+                "In dot_rowwise, rhs iterator must be column-major");
+
+  // In the special case of lhs.cols() == rhs.rows() == 0, just fill dst with
+  // all 0s.
+  if (lhs.cols() == 0) {
+    dst->fill(T());
+    return;
+  }
+
+  RowMajorFriendlyIterator lhs_iter(lhs.rows(), lhs.cols());
+  UIter rhs_iter(rhs.rows(), rhs.cols());
+
+  for (size_t dst_row = 0; dst_row < dst->rows(); ++dst_row) {
+    for (size_t dst_col = 0; dst_col < dst->cols(); ++dst_col) {
+      T* dst_ptr = &(*dst)(dst_row, dst_col);
+      *dst_ptr = T();
+      // Iterate over the current row of lhs, and the current column of rhs.
+      for (size_t inner_ind = 0; inner_ind + 1 < lhs.cols(); ++inner_ind) {
+        (*dst_ptr) += lhs(lhs_iter.index()) * rhs(rhs_iter.index());
+        lhs_iter.next_minor_dim();
+        rhs_iter.next_minor_dim();
+      }
+      (*dst_ptr) += lhs(lhs_iter.index()) * rhs(rhs_iter.index());
+
+      // For the final one, if we're at the last column, move lhs to the next
+      // row and reset rhs to the very beginning. Otherwise, rewind the lhs to
+      // the start of the current row, and advance rhs to the next column.
+      if (dst_col + 1 < dst->cols()) {
+        lhs_iter.rewind_minor_dim(lhs.cols() - 1);
+        rhs_iter.next_major_dim();
+      } else {
+        lhs_iter.next_major_dim();
+        rhs_iter.reset();
+      }
+    }
+  }
+}
+
+// Matrix multiplies lhs and rhs, and stores the result in dst. Does col-wise
+// matrix-multiplication (iterate over dst in col-major order). Assumes dst and
+// lhs are both col-major. Uses the given RowMajor iterator type for rhs.
+template <typename UIter, typename T, typename U>
+void dot_colwise(Matrix<T>* dst, const Matrix<T>& lhs, const Matrix<U>& rhs) {
+  assert(!dst->is_row_major());
+  assert(!lhs.is_row_major());
+  static_assert(UIter::is_row_major,
+                "In dot_colwise, rhs iterator must be row-major");
+
+  // Initialize the destination to all 0s.
+  dst->fill(T());
+
+  // In the special case of lhs.rows() == 0, end it here.
+  if (lhs.rows() == 0) return;
+
+  ColMajorFriendlyIterator dst_iter(dst->rows(), dst->cols());
+  ColMajorFriendlyIterator lhs_iter(lhs.rows(), lhs.cols());
+  UIter rhs_iter(rhs.rows(), rhs.cols());
+
+  for (size_t rhs_row = 0; rhs_row < rhs.rows(); ++rhs_row) {
+    for (size_t rhs_col = 0; rhs_col < rhs.cols(); ++rhs_col) {
+      const U& rhs_val = rhs(rhs_iter.index());
+      // Iterate over the current columns of dst and lhs.
+      for (size_t inner_ind = 0; inner_ind + 1 < lhs.rows(); ++inner_ind) {
+        (*dst)(dst_iter.index()) += lhs(lhs_iter.index()) * rhs_val;
+        dst_iter.next_minor_dim();
+        lhs_iter.next_minor_dim();
+      }
+      (*dst)(dst_iter.index()) += lhs(lhs_iter.index()) * rhs_val;
+
+      // For the final one, if we're at the last column of rhs, move lhs to the
+      // next column, reset dst to the very beginning, and move rhs to the next
+      // major dim. Otherwise, rewind lhs to the start of the current column,
+      // advance dst to the next column, and move rhs to the next minor dim.
+      if (rhs_col + 1 < rhs.cols()) {
+        lhs_iter.rewind_minor_dim(lhs.rows() - 1);
+        dst_iter.next_major_dim();
+        rhs_iter.next_minor_dim();
+      } else {
+        lhs_iter.next_major_dim();
+        dst_iter.reset();
+        rhs_iter.next_major_dim();
+      }
+    }
+  }
+}
+
+
 }  // namespace internal
 
 template <typename T>
@@ -430,7 +540,7 @@ template <typename T>
 Matrix<T>::Matrix(uint32_t rows, uint32_t cols, const T& value,
                   bool is_row_major)
     : Matrix(rows, cols, is_row_major) {
-  std::fill(data_.get(), data_.get() + (rows_ * cols_), value);
+  std::fill(data_.get(), data_.get() + size(), value);
 }
 
 template <typename T>
@@ -481,20 +591,26 @@ Matrix<T>& Matrix<T>::operator=(Matrix<T>&& other) {
 }
 
 template <typename T>
+template <typename X>
+void Matrix<T>::fill(const X& val) {
+  std::fill(data(), data() + (rows() * cols()), val);
+}
+
+template <typename T>
 T& Matrix<T>::operator()(uint32_t i, uint32_t j) {
   if (is_row_major()) {
-    return data_[i * cols() + j];
+    return data()[i * cols() + j];
   } else {
-    return data_[j * rows() + i];
+    return data()[j * rows() + i];
   }
 }
 
 template <typename T>
 const T& Matrix<T>::operator()(uint32_t i, uint32_t j) const {
   if (is_row_major()) {
-    return data_[i * cols() + j];
+    return data()[i * cols() + j];
   } else {
-    return data_[j * rows() + i];
+    return data()[j * rows() + i];
   }
 }
 
@@ -591,9 +707,55 @@ Matrix<bool> operator==(const Matrix<T>& lhs, const X& rhs) {
   return result;
 }
 
+template <typename T, typename X>
+Matrix<bool> operator!=(const Matrix<T>& lhs, const X& rhs) {
+  Matrix<bool> result(lhs.rows(), lhs.cols());
+  internal::apply_operator<std::not_equal_to<T>>(&result, lhs, rhs);
+  return result;
+}
+
+template <typename T>
+bool Matrix<T>::all() const {
+  for (size_t l = 0; l < size(); ++l) {
+    if (!data()[l]) return false;
+  }
+  return true;
+}
+
+template <typename T>
+bool Matrix<T>::any() const {
+  for (size_t l = 0; l < size(); ++l) {
+    if (data()[l]) return true;
+  }
+  return false;
+}
+
 template <typename T>
 template <typename X>
 Matrix<T> Matrix<T>::dot(const Matrix<X>& rhs) const {
+  using namespace internal;
+  check_dot_dim_match(*this, rhs);
+
+  // Allocate a dst matrix with the same row/col-majorness as this.
+  Matrix<T> dst(rows(), rhs.cols(), is_row_major());
+
+  // Invoke the correct style of matrix multiplication based on the
+  // row/col-majorness of this.
+  if (is_row_major()) {
+    if (rhs.is_row_major()) {
+      dot_rowwise<ColMajorUnfriendlyIterator>(&dst, *this, rhs);
+    } else {
+      dot_rowwise<ColMajorFriendlyIterator>(&dst, *this, rhs);
+    }
+  } else {
+    if (rhs.is_row_major()) {
+      dot_colwise<RowMajorFriendlyIterator>(&dst, *this, rhs);
+    } else {
+      dot_colwise<RowMajorUnfriendlyIterator>(&dst, *this, rhs);
+    }
+  }
+
+  return dst;
 }
 
 template <typename T>

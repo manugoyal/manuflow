@@ -1,0 +1,4 @@
+.*.swp
+*.dSYM
+*.o
+matrix_test

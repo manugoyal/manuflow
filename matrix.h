@@ -34,6 +34,10 @@ class Matrix {
   uint32_t size() const { return rows_ * cols_; }
   bool is_row_major() const { return is_row_major_; }
 
+  // Container operations.
+  template <typename X>
+  void fill(const X& val);
+
   // Element Access.
   
   // Non-bounds-checked. Behavior undefined if index is out of range.
@@ -62,7 +66,11 @@ class Matrix {
   template <typename X>
   Matrix& operator/=(const X& rhs);
 
-  //// Matrix operations.
+  // Simple reduction operators.
+  bool all() const;
+  bool any() const;
+
+  // Matrix operations.
 
   // Computes matrix product with rhs.
   template <typename X>
